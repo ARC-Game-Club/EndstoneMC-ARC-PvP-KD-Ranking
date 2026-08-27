@@ -1,24 +1,34 @@
-# EndStone ARC 弧光猎手榜
+# EndStone ARC 弧光 PvP KD 排行榜插件
 
-记录玩家 PvP 击杀/死亡（KD），按 KD 自动授予猎杀手衔，并提供全服榜单播报与个人查询 Form。
+记录玩家 PvP 击杀/死亡（KD），按 KD 自动授予 PvP 头衔，并提供全服榜单播报与个人查询 Form。
+
+## 命名规范
+
+| 层级 | 标识 |
+|------|------|
+| 中文全名 | 弧光 PvP KD 排行榜插件 |
+| GitHub 仓库 | `EndstoneMC-ARC-PvP-KD-Ranking` |
+| Python 包 | `endstone_arc_pvp_kd` |
+| EndStone 插件 ID | `arc_pvp_kd` |
+| 数据目录前缀 | `ARCPvPKD` |
+| 命令 | `/kd` |
 
 ## 功能
 
 - 玩家击杀玩家时累计击杀与死亡
 - **10 秒助攻归因**：若某人在 10 秒内被玩家攻击后死亡（摔死、火烧等），击杀记给最后一名攻击者
-- 按 KD 自动切换猎杀手衔（依赖 `arc_core` 头衔系统）
-- **`/hunter`**：向查询玩家单独弹出 Form，展示个人战绩与全服 KD 前 10（**不全服广播**）
+- 按 KD 自动切换 PvP 头衔（依赖 `arc_core` 头衔系统）
+- **`/kd`**：向查询玩家单独弹出 Form，展示个人战绩与全服 KD 前 10（**不全服广播**）
 - **全服播报**（仅 PvP 数据变化时）：
-  - 玩家首次上榜时广播「加入了猎手榜」
+  - 玩家首次上榜时广播「加入了 PvP KD 排行榜」
   - 每次有效击杀导致榜单变化后，全服刷新播报前 10 名
-- **弧光核心对接**：安装 `arc_core` 且核心检测到本插件（`arc_hunter`）时，主菜单显示「猎手榜」按钮
+- **弧光核心对接**：安装 `arc_core` 且核心检测到本插件（`arc_pvp_kd`）时，主菜单显示「PvP KD 排行榜」按钮
 
 ## 榜单配色
 
 - 榜单普通文本为白色（`§f`）
 - 评级/头衔名称按稀有度着色，与 `arc_core` 头衔系统一致：
   - **普通** `§h`、**稀有** `§9`、**史诗** `§u`、**传奇** `§6`、**神话** `§c`
-- 已连接 `arc_core` 时优先读取核心的 `TitleSystem` 颜色映射
 
 ## 称号等级
 
@@ -41,21 +51,19 @@
 
 ## 安装
 
-```bash
-pip install dist/endstone_arc_hunter-*.whl -t <服务器>/plugins/.local
-```
+将 `dist/endstone_arc_pvp_kd-*.whl` 放入服务器 `bedrock_server/plugins/` 目录，重启服务器。
 
-或将 wheel 放入服务器 `plugins` 目录后按服务器既有插件安装流程处理，然后重启。
+数据目录：`plugins/ARCPvPKD/`（SQLite：`pvp_kd.db`）
 
-数据目录：`plugins/ARCHunter/`（SQLite：`hunter.db`）
+首次从旧版 `arc_hunter` 升级时，会自动从 `plugins/ARCHunter/hunter.db` 复制数据。
 
 ## 命令
 
 | 命令 | 说明 |
 |------|------|
-| `/hunter` | 打开个人猎手榜 Form（战绩 + 前 10） |
+| `/kd` | 打开个人 PvP KD 排行榜 Form（战绩 + 前 10） |
 
 ## 插件 ID
 
-- EndStone entry-point：`arc_hunter`
-- 前缀：`ARCHunter`
+- EndStone entry-point：`arc_pvp_kd`
+- 前缀：`ARCPvPKD`

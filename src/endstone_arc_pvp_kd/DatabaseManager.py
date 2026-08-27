@@ -34,7 +34,7 @@ class DatabaseManager:
             self.connection.commit()
             return True
         except Exception as e:
-            print(f"[ARCHunter] Execute SQL error: {e}")
+            print(f"[ARCPvPKD] Execute SQL error: {e}")
             self.connection.rollback()
             return False
 
@@ -45,7 +45,7 @@ class DatabaseManager:
             row = cursor.fetchone()
             return dict(row) if row else None
         except Exception as e:
-            print(f"[ARCHunter] Query one error: {e}")
+            print(f"[ARCPvPKD] Query one error: {e}")
             return None
 
     def query_all(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
@@ -54,7 +54,7 @@ class DatabaseManager:
             cursor.execute(sql, params)
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
-            print(f"[ARCHunter] Query all error: {e}")
+            print(f"[ARCPvPKD] Query all error: {e}")
             return []
 
     def create_table(self, table: str, fields: Dict[str, str]) -> bool:

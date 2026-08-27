@@ -1,8 +1,9 @@
 """
-弧光猎手榜：PvP KD 统计 + 按 KD 授予猎杀手衔。
+弧光 PvP KD 排行榜插件：PvP KD 统计 + 按 KD 授予 PvP 头衔。
 """
 
 import os
+import shutil
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -13,24 +14,27 @@ from endstone.plugin import Plugin
 
 from .DatabaseManager import DatabaseManager
 
+PLUGIN_DISPLAY_NAME = "弧光 PvP KD 排行榜"
+LOG_PREFIX = "[ARCPvPKD]"
+BROADCAST_TAG = "PvP KD榜"
+
 # 最后攻击者归因窗口（秒）
 ASSIST_WINDOW_SEC = 10.0
 
 # 称号：按 KD 从低到高；(min_kd, max_kd_inclusive_or_None, title, rarity, description)
-# max_kd 为 None 表示无上限
-HUNTER_TITLE_TIERS: List[Tuple[float, Optional[float], str, str, str]] = [
-    (0.00, 0.39, "人榜丙等猎杀者", "普通", "弧光猎手榜 · 人榜丙等"),
-    (0.40, 0.69, "人榜乙等猎杀者", "稀有", "弧光猎手榜 · 人榜乙等"),
-    (0.70, 0.99, "人榜甲等猎杀者", "稀有", "弧光猎手榜 · 人榜甲等"),
-    (1.00, 1.99, "地榜丙等猎杀者", "史诗", "弧光猎手榜 · 地榜丙等"),
-    (2.00, 2.99, "地榜乙等猎杀者", "史诗", "弧光猎手榜 · 地榜乙等"),
-    (3.00, 4.99, "地榜甲等猎杀者", "传奇", "弧光猎手榜 · 地榜甲等"),
-    (5.00, 6.99, "天榜丙等猎杀者", "传奇", "弧光猎手榜 · 天榜丙等"),
-    (7.00, 9.99, "天榜乙等猎杀者", "神话", "弧光猎手榜 · 天榜乙等"),
-    (10.00, None, "天榜甲等猎杀者", "神话", "弧光猎手榜 · 天榜甲等"),
+PVP_KD_TITLE_TIERS: List[Tuple[float, Optional[float], str, str, str]] = [
+    (0.00, 0.39, "人榜丙等猎杀者", "普通", f"{PLUGIN_DISPLAY_NAME} · 人榜丙等"),
+    (0.40, 0.69, "人榜乙等猎杀者", "稀有", f"{PLUGIN_DISPLAY_NAME} · 人榜乙等"),
+    (0.70, 0.99, "人榜甲等猎杀者", "稀有", f"{PLUGIN_DISPLAY_NAME} · 人榜甲等"),
+    (1.00, 1.99, "地榜丙等猎杀者", "史诗", f"{PLUGIN_DISPLAY_NAME} · 地榜丙等"),
+    (2.00, 2.99, "地榜乙等猎杀者", "史诗", f"{PLUGIN_DISPLAY_NAME} · 地榜乙等"),
+    (3.00, 4.99, "地榜甲等猎杀者", "传奇", f"{PLUGIN_DISPLAY_NAME} · 地榜甲等"),
+    (5.00, 6.99, "天榜丙等猎杀者", "传奇", f"{PLUGIN_DISPLAY_NAME} · 天榜丙等"),
+    (7.00, 9.99, "天榜乙等猎杀者", "神话", f"{PLUGIN_DISPLAY_NAME} · 天榜乙等"),
+    (10.00, None, "天榜甲等猎杀者", "神话", f"{PLUGIN_DISPLAY_NAME} · 天榜甲等"),
 ]
 
-ALL_HUNTER_TITLES = {t[2] for t in HUNTER_TITLE_TIERS}
+ALL_PVP_KD_TITLES = {t[2] for t in PVP_KD_TITLE_TIERS}
 
 # 与 arc_core TitleSystem.RARITY_COLORS 保持一致
 RARITY_COLORS = {
@@ -42,61 +46,70 @@ RARITY_COLORS = {
 }
 
 
-class ARCHunterPlugin(Plugin):
-    prefix = "ARCHunter"
+class ARCPvPKDPlugin(Plugin):
+    prefix = "ARCPvPKD"
     api_version = "0.10"
     load = "POSTWORLD"
 
     commands = {
-        "hunter": {
-            "description": "查看弧光猎手榜 / 个人 KD",
-            "usages": ["/hunter"],
-            "permissions": ["arc_hunter.command.hunter"],
+        "kd": {
+            "description": f"查看{PLUGIN_DISPLAY_NAME} / 个人 KD",
+            "usages": ["/kd"],
+            "permissions": ["arc_pvp_kd.command.kd"],
         },
     }
 
     permissions = {
-        "arc_hunter.command.hunter": {
-            "description": "允许使用 /hunter",
+        "arc_pvp_kd.command.kd": {
+            "description": "允许使用 /kd",
             "default": True,
         },
     }
 
     def on_load(self) -> None:
-        self.logger.info("[ARCHunter] on_load")
-        data_dir = os.path.join("plugins", "ARCHunter")
+        self.logger.info(f"{LOG_PREFIX} on_load")
+        data_dir = os.path.join("plugins", "ARCPvPKD")
         os.makedirs(data_dir, exist_ok=True)
-        self.db = DatabaseManager(os.path.join(data_dir, "hunter.db"))
+        db_path = os.path.join(data_dir, "pvp_kd.db")
+        self._migrate_legacy_database(db_path)
+        self.db = DatabaseManager(db_path)
         self._create_tables()
-        # victim_xuid -> (attacker_xuid, attacker_name, timestamp)
         self._last_attackers: Dict[str, Tuple[str, str, float]] = {}
         self.arc = None
 
+    @staticmethod
+    def _migrate_legacy_database(new_db_path: str) -> None:
+        """从旧版 arc_hunter（ARCHunter/hunter.db）迁移数据。"""
+        if os.path.exists(new_db_path):
+            return
+        legacy_db = os.path.join("plugins", "ARCHunter", "hunter.db")
+        if os.path.exists(legacy_db):
+            shutil.copy2(legacy_db, new_db_path)
+
     def on_enable(self) -> None:
-        self.logger.info("[ARCHunter] on_enable")
+        self.logger.info(f"{LOG_PREFIX} on_enable")
         self.register_events(self)
         self.arc = self.server.plugin_manager.get_plugin("arc_core")
         if self.arc is None:
-            self.logger.warning("[ARCHunter] 未找到 arc_core，头衔功能将不可用（KD 仍会记录）")
+            self.logger.warning(f"{LOG_PREFIX} 未找到 arc_core，头衔功能将不可用（KD 仍会记录）")
         else:
-            self._ensure_hunter_titles()
-            self.logger.info("[ARCHunter] 已连接 arc_core，猎杀手衔已注册")
+            self._ensure_pvp_kd_titles()
+            self.logger.info(f"{LOG_PREFIX} 已连接 arc_core，PvP KD 头衔已注册")
 
     def on_disable(self) -> None:
-        self.logger.info("[ARCHunter] on_disable")
+        self.logger.info(f"{LOG_PREFIX} on_disable")
         if hasattr(self, "db"):
             self.db.close()
 
     def on_command(self, sender: CommandSender, command: Command, args: list[str]) -> bool:
-        if command.name != "hunter":
+        if command.name != "kd":
             return True
         if not hasattr(sender, "xuid"):
             sender.send_message("§c该命令仅玩家可用。")
             return True
-        self._show_hunter_panel(sender)
+        self._show_ranking_panel(sender)
         return True
 
-    # ------------------------------------------------------------------ DB
     def _create_tables(self) -> None:
         ok = self.db.create_table(
             "player_kd",
@@ -109,9 +122,9 @@ class ARCHunterPlugin(Plugin):
             },
         )
         if ok:
-            self.logger.info("[ARCHunter] player_kd 表就绪")
+            self.logger.info(f"{LOG_PREFIX} player_kd 表就绪")
         else:
-            self.logger.error("[ARCHunter] 创建 player_kd 表失败")
+            self.logger.error(f"{LOG_PREFIX} 创建 player_kd 表失败")
 
     def _ensure_player_row(self, xuid: str, name: str) -> None:
         row = self.db.query_one("SELECT xuid FROM player_kd WHERE xuid = ?", (xuid,))
@@ -148,13 +161,7 @@ class ARCHunterPlugin(Plugin):
             return 0, 0
         return int(row["kills"] or 0), int(row["deaths"] or 0)
 
-    def _get_player_stats(self, xuid: str) -> Optional[dict]:
-        return self.db.query_one(
-            "SELECT xuid, name, kills, deaths FROM player_kd WHERE xuid = ?", (xuid,)
-        )
-
     def _get_top_players(self, limit: int = 10) -> List[dict]:
-        # 按 KD 降序；死亡为 0 时用 kills 作为 KD；同 KD 按击杀多优先
         rows = self.db.query_all(
             """
             SELECT xuid, name, kills, deaths,
@@ -213,7 +220,7 @@ class ARCHunterPlugin(Plugin):
         try:
             self.server.broadcast_message(text)
         except Exception as e:
-            self.logger.warning(f"[ARCHunter] 播报失败: {e}")
+            self.logger.warning(f"{LOG_PREFIX} 播报失败: {e}")
 
     def _broadcast_lines(self, lines: List[str]) -> None:
         for line in lines:
@@ -222,17 +229,14 @@ class ARCHunterPlugin(Plugin):
                 self._broadcast(stripped)
 
     def _broadcast_newcomer(self, name: str) -> None:
-        self._broadcast(f"§f[猎手榜] {name} 加入了猎手榜！")
+        self._broadcast(f"§f[{BROADCAST_TAG}] {name} 加入了 PvP KD 排行榜！")
 
     def _broadcast_leaderboard(self) -> None:
-        lines = ["§f弧光猎手榜  榜单已更新"]
+        lines = [f"§f{PLUGIN_DISPLAY_NAME}  榜单已更新"]
         lines.extend(self._format_top_players_lines(10))
         self._broadcast_lines(lines)
 
-    def _notify_leaderboard_changes(
-        self,
-        newcomers: List[str],
-    ) -> None:
+    def _notify_leaderboard_changes(self, newcomers: List[str]) -> None:
         seen = set()
         for name in newcomers:
             key = str(name or "").strip()
@@ -250,23 +254,22 @@ class ARCHunterPlugin(Plugin):
 
     @staticmethod
     def title_info_for_kd(kd: float) -> Tuple[str, str]:
-        for min_kd, max_kd, title, rarity, _desc in HUNTER_TITLE_TIERS:
+        for min_kd, max_kd, title, rarity, _desc in PVP_KD_TITLE_TIERS:
             if kd + 1e-9 < min_kd:
                 continue
             if max_kd is None or kd <= max_kd + 1e-9:
                 return title, rarity
-        first = HUNTER_TITLE_TIERS[0]
+        first = PVP_KD_TITLE_TIERS[0]
         return first[2], first[3]
 
     @staticmethod
     def title_for_kd(kd: float) -> str:
-        return ARCHunterPlugin.title_info_for_kd(kd)[0]
+        return ARCPvPKDPlugin.title_info_for_kd(kd)[0]
 
-    # ------------------------------------------------------------------ Titles
-    def _ensure_hunter_titles(self) -> None:
+    def _ensure_pvp_kd_titles(self) -> None:
         if self.arc is None:
             return
-        for _min, _max, title, rarity, desc in HUNTER_TITLE_TIERS:
+        for _min, _max, title, rarity, desc in PVP_KD_TITLE_TIERS:
             try:
                 self.arc.api_ensure_title_definition(
                     title,
@@ -276,10 +279,9 @@ class ARCHunterPlugin(Plugin):
                     reward_items=[],
                 )
             except Exception as e:
-                self.logger.warning(f"[ARCHunter] 注册头衔失败 {title}: {e}")
+                self.logger.warning(f"{LOG_PREFIX} 注册头衔失败 {title}: {e}")
 
-    def _sync_hunter_title(self, xuid: str, player=None) -> None:
-        """按当前 KD 撤销其它猎手称号，解锁并（若合适）佩戴对应称号。"""
+    def _sync_pvp_kd_title(self, xuid: str, player=None) -> None:
         if self.arc is None:
             return
         kills, deaths = self._get_kd_counts(xuid)
@@ -295,9 +297,8 @@ class ARCHunterPlugin(Plugin):
         except Exception:
             equipped = ""
 
-        # 撤销其它猎手称号
         if title_system is not None:
-            for t in ALL_HUNTER_TITLES:
+            for t in ALL_PVP_KD_TITLES:
                 if t == target_title:
                     continue
                 try:
@@ -305,7 +306,6 @@ class ARCHunterPlugin(Plugin):
                 except Exception:
                     pass
 
-        # 解锁目标称号
         online = player
         if online is None:
             online = self._find_online_by_xuid(xuid)
@@ -315,11 +315,10 @@ class ARCHunterPlugin(Plugin):
             else:
                 self.arc.api_unlock_title_by_xuid(xuid, target_title)
         except Exception as e:
-            self.logger.warning(f"[ARCHunter] 解锁头衔失败: {e}")
+            self.logger.warning(f"{LOG_PREFIX} 解锁头衔失败: {e}")
             return
 
-        # 若当前未佩戴，或佩戴的是旧猎手称号，则换成新称号
-        should_equip = (not equipped) or (equipped in ALL_HUNTER_TITLES)
+        should_equip = (not equipped) or (equipped in ALL_PVP_KD_TITLES)
         if should_equip and title_system is not None and online is not None:
             try:
                 title_system.set_equipped_title(online, target_title)
@@ -327,7 +326,7 @@ class ARCHunterPlugin(Plugin):
                 if callable(update_tag):
                     update_tag(online)
             except Exception as e:
-                self.logger.warning(f"[ARCHunter] 佩戴头衔失败: {e}")
+                self.logger.warning(f"{LOG_PREFIX} 佩戴头衔失败: {e}")
 
     def _find_online_by_xuid(self, xuid: str):
         for p in self.server.online_players:
@@ -335,7 +334,6 @@ class ARCHunterPlugin(Plugin):
                 return p
         return None
 
-    # ------------------------------------------------------------------ Events
     @event_handler
     def on_actor_damage(self, event: ActorDamageEvent):
         try:
@@ -355,7 +353,7 @@ class ARCHunterPlugin(Plugin):
             attacker_name = str(getattr(attacker, "name", "") or attacker_xuid)
             self._last_attackers[victim_xuid] = (attacker_xuid, attacker_name, time.time())
         except Exception as e:
-            self.logger.warning(f"[ARCHunter] on_actor_damage 异常: {e}")
+            self.logger.warning(f"{LOG_PREFIX} on_actor_damage 异常: {e}")
 
     @event_handler
     def on_player_death(self, event: PlayerDeathEvent):
@@ -369,17 +367,16 @@ class ARCHunterPlugin(Plugin):
                 return
 
             killer_xuid, killer_name = self._resolve_killer(event, victim_xuid)
-            # 仅当存在玩家击杀者（直接击杀或 10 秒内最后攻击）时记 KD
             if killer_xuid and killer_xuid != victim_xuid:
                 killer_was_on_board = self._is_on_leaderboard(killer_xuid)
                 victim_was_on_board = self._is_on_leaderboard(victim_xuid)
 
                 self._add_death(victim_xuid, victim_name)
-                self._sync_hunter_title(victim_xuid, player=victim)
+                self._sync_pvp_kd_title(victim_xuid, player=victim)
 
                 self._add_kill(killer_xuid, killer_name)
                 killer_online = self._find_online_by_xuid(killer_xuid)
-                self._sync_hunter_title(killer_xuid, player=killer_online)
+                self._sync_pvp_kd_title(killer_xuid, player=killer_online)
 
                 newcomers: List[str] = []
                 if not killer_was_on_board:
@@ -393,19 +390,17 @@ class ARCHunterPlugin(Plugin):
                     kd = self.calc_kd(k, d)
                     ktitle, krarity = self.title_info_for_kd(kd)
                     killer_online.send_message(
-                        f"§f[猎手榜] 击杀 {victim_name} | K/D {k}/{d} ({kd:.2f}) → {self._format_title(ktitle, krarity)}"
+                        f"§f[{BROADCAST_TAG}] 击杀 {victim_name} | K/D {k}/{d} ({kd:.2f}) → {self._format_title(ktitle, krarity)}"
                     )
                 victim.send_message(
-                    f"§f[猎手榜] 你被 {killer_name} 击杀"
+                    f"§f[{BROADCAST_TAG}] 你被 {killer_name} 击杀"
                 )
 
             self._last_attackers.pop(victim_xuid, None)
         except Exception as e:
-            self.logger.warning(f"[ARCHunter] on_player_death 异常: {e}")
+            self.logger.warning(f"{LOG_PREFIX} on_player_death 异常: {e}")
 
     def _resolve_killer(self, event: PlayerDeathEvent, victim_xuid: str) -> Tuple[str, str]:
-        """优先用 damage_source 的玩家击杀者；否则用 10 秒内最后攻击者。"""
-        # 1) 直接击杀者
         try:
             damage_source = getattr(event, "damage_source", None)
             killer = getattr(damage_source, "actor", None) if damage_source else None
@@ -417,7 +412,6 @@ class ARCHunterPlugin(Plugin):
         except Exception:
             pass
 
-        # 2) 10 秒内最后攻击者（摔死/火烧等）
         info = self._last_attackers.get(victim_xuid)
         if info:
             ax, an, ts = info
@@ -434,8 +428,7 @@ class ARCHunterPlugin(Plugin):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------ UI
-    def _build_hunter_panel_content(self, xuid: str) -> str:
+    def _build_ranking_panel_content(self, xuid: str) -> str:
         kills, deaths = self._get_kd_counts(xuid)
         kd = self.calc_kd(kills, deaths)
         if kills > 0 or deaths > 0:
@@ -452,13 +445,13 @@ class ARCHunterPlugin(Plugin):
         lines.extend(self._format_top_players_lines(10, highlight_xuid=xuid))
         return "\n".join(lines)
 
-    def _show_hunter_panel(self, player) -> None:
+    def _show_ranking_panel(self, player) -> None:
         xuid = str(player.xuid)
         name = str(player.name)
         self._ensure_player_row(xuid, name)
         panel = ActionForm(
-            title="§f弧光猎手榜",
-            content=self._build_hunter_panel_content(xuid),
+            title=f"§f{PLUGIN_DISPLAY_NAME}",
+            content=self._build_ranking_panel_content(xuid),
             on_close=None,
         )
         player.send_form(panel)
