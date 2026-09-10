@@ -8,7 +8,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from endstone.command import Command, CommandSender
-from endstone.event import ActorDamageEvent, PlayerDeathEvent, PlayerQuitEvent, event_handler
+from endstone.event import ActorDamageEvent, PlayerDeathEvent, PlayerJoinEvent, PlayerQuitEvent, event_handler
 from endstone.form import ActionForm
 from endstone.plugin import Plugin
 
@@ -20,21 +20,26 @@ BROADCAST_TAG = "PvP KD榜"
 
 # 最后攻击者归因窗口（秒）
 ASSIST_WINDOW_SEC = 10.0
+# 进服后延迟再广播榜单（tick），让进服玩家也能看到
+JOIN_BROADCAST_DELAY_TICKS = 40
 
 # 称号：按 KD 从低到高；(min_kd, max_kd_inclusive_or_None, title, rarity, description)
+# 品质规则：最高档（天榜甲等）= 神话（红）；其余 8 档每两档共一品质（普通→稀有→史诗→传奇）
 PVP_KD_TITLE_TIERS: List[Tuple[float, Optional[float], str, str, str]] = [
     (0.00, 0.39, "人榜丙等猎杀者", "普通", f"{PLUGIN_DISPLAY_NAME} · 人榜丙等"),
-    (0.40, 0.69, "人榜乙等猎杀者", "稀有", f"{PLUGIN_DISPLAY_NAME} · 人榜乙等"),
+    (0.40, 0.69, "人榜乙等猎杀者", "普通", f"{PLUGIN_DISPLAY_NAME} · 人榜乙等"),
     (0.70, 0.99, "人榜甲等猎杀者", "稀有", f"{PLUGIN_DISPLAY_NAME} · 人榜甲等"),
-    (1.00, 1.99, "地榜丙等猎杀者", "史诗", f"{PLUGIN_DISPLAY_NAME} · 地榜丙等"),
+    (1.00, 1.99, "地榜丙等猎杀者", "稀有", f"{PLUGIN_DISPLAY_NAME} · 地榜丙等"),
     (2.00, 2.99, "地榜乙等猎杀者", "史诗", f"{PLUGIN_DISPLAY_NAME} · 地榜乙等"),
-    (3.00, 4.99, "地榜甲等猎杀者", "传奇", f"{PLUGIN_DISPLAY_NAME} · 地榜甲等"),
+    (3.00, 4.99, "地榜甲等猎杀者", "史诗", f"{PLUGIN_DISPLAY_NAME} · 地榜甲等"),
     (5.00, 6.99, "天榜丙等猎杀者", "传奇", f"{PLUGIN_DISPLAY_NAME} · 天榜丙等"),
-    (7.00, 9.99, "天榜乙等猎杀者", "神话", f"{PLUGIN_DISPLAY_NAME} · 天榜乙等"),
+    (7.00, 9.99, "天榜乙等猎杀者", "传奇", f"{PLUGIN_DISPLAY_NAME} · 天榜乙等"),
     (10.00, None, "天榜甲等猎杀者", "神话", f"{PLUGIN_DISPLAY_NAME} · 天榜甲等"),
 ]
 
 ALL_PVP_KD_TITLES = {t[2] for t in PVP_KD_TITLE_TIERS}
+PVP_KD_TITLE_RARITY_MAP = {t[2]: t[3] for t in PVP_KD_TITLE_TIERS}
+PVP_KD_TITLE_DESC_MAP = {t[2]: t[4] for t in PVP_KD_TITLE_TIERS}
 
 # 与 arc_core TitleSystem.RARITY_COLORS 保持一致
 RARITY_COLORS = {
@@ -93,8 +98,10 @@ class ARCPvPKDPlugin(Plugin):
         if self.arc is None:
             self.logger.warning(f"{LOG_PREFIX} 未找到 arc_core，头衔功能将不可用（KD 仍会记录）")
         else:
+            self._migrate_pvp_title_rarities()
             self._ensure_pvp_kd_titles()
             self._register_arc_main_menu_button()
+            self._resync_all_pvp_kd_titles()
             self.logger.info(f"{LOG_PREFIX} 已连接 arc_core，PvP KD 头衔已注册")
 
     def on_disable(self) -> None:
@@ -235,7 +242,7 @@ class ARCPvPKDPlugin(Plugin):
                 colored_title = self._format_title(rtitle, rrarity)
                 mark = " §f◀你" if highlight_xuid and str(row.get("xuid")) == highlight_xuid else ""
                 lines.append(
-                    f"§f#{i} {rname}  {rk}/{rd}  {rkd:.2f}  {colored_title}{mark}"
+                    f"§f#{i} {rname}  {rk}/{rd}  {self.format_kd(rk, rd)}  {colored_title}{mark}"
                 )
         return lines
 
@@ -259,6 +266,16 @@ class ARCPvPKDPlugin(Plugin):
         lines.extend(self._format_top_players_lines(10))
         self._broadcast_lines(lines)
 
+    def _broadcast_leaderboard_on_join(self, joiner_name: str = "") -> None:
+        name = str(joiner_name or "").strip()
+        if name:
+            header = f"§f[{BROADCAST_TAG}] {name} 进服 · 当前榜单"
+        else:
+            header = f"§f[{BROADCAST_TAG}] 当前榜单"
+        lines = [header]
+        lines.extend(self._format_top_players_lines(10))
+        self._broadcast_lines(lines)
+
     def _notify_leaderboard_changes(self, newcomers: List[str]) -> None:
         seen = set()
         for name in newcomers:
@@ -271,9 +288,21 @@ class ARCPvPKDPlugin(Plugin):
 
     @staticmethod
     def calc_kd(kills: int, deaths: int) -> float:
+        """数值 KD（用于排序/头衔）。0 死有杀按击杀数近似，非展示用。"""
+        if kills <= 0 and deaths <= 0:
+            return 0.0
         if deaths <= 0:
             return float(kills)
         return float(kills) / float(deaths)
+
+    @staticmethod
+    def format_kd(kills: int, deaths: int) -> str:
+        """展示用 KD：0-0 为 -；有杀无死为 ∞；其余两位小数。"""
+        if kills <= 0 and deaths <= 0:
+            return "-"
+        if deaths <= 0:
+            return "∞"
+        return f"{float(kills) / float(deaths):.2f}"
 
     @staticmethod
     def title_info_for_kd(kd: float) -> Tuple[str, str]:
@@ -294,7 +323,7 @@ class ARCPvPKDPlugin(Plugin):
             return
         for _min, _max, title, rarity, desc in PVP_KD_TITLE_TIERS:
             try:
-                self.arc.api_ensure_title_definition(
+                self.arc.api_set_title_definition(
                     title,
                     rarity=rarity,
                     description=desc,
@@ -304,6 +333,105 @@ class ARCPvPKDPlugin(Plugin):
             except Exception as e:
                 self.logger.warning(f"{LOG_PREFIX} 注册头衔失败 {title}: {e}")
 
+    def _migrate_pvp_title_rarities(self) -> None:
+        """将 arc_core 头衔库中 PvP 榜头衔的定义/解锁/佩戴统一为正确稀有度。"""
+        if self.arc is None:
+            return
+        title_system = getattr(self.arc, "title_system", None)
+        if title_system is None:
+            return
+        db = title_system.database_manager
+        migrated_defs = 0
+        migrated_unlocks = 0
+        migrated_equipped = 0
+
+        for title, target_rarity in PVP_KD_TITLE_RARITY_MAP.items():
+            rows = db.query_all(
+                "SELECT title, rarity, description, reward_money, reward_items "
+                "FROM title_definitions WHERE title = ?",
+                (title,),
+            ) or []
+
+            description = PVP_KD_TITLE_DESC_MAP.get(title, "")
+            reward_money = 0.0
+            reward_items = "[]"
+            for row in rows:
+                row_rarity = str(row.get("rarity") or "").strip()
+                row_desc = str(row.get("description") or "").strip()
+                if row_rarity == target_rarity:
+                    if row_desc:
+                        description = row_desc
+                    reward_money = float(row.get("reward_money") or 0.0)
+                    reward_items = row.get("reward_items") or "[]"
+                elif not description and row_desc:
+                    description = row_desc
+
+            db.execute(
+                "INSERT OR REPLACE INTO title_definitions "
+                "(title, rarity, description, reward_money, reward_items) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (title, target_rarity, description, reward_money, reward_items),
+            )
+            removed_defs = db.execute(
+                "DELETE FROM title_definitions WHERE title = ? AND rarity != ?",
+                (title, target_rarity),
+            )
+            if removed_defs:
+                migrated_defs += int(removed_defs)
+
+            unlock_rows = db.query_all(
+                "SELECT xuid, rarity, unlocked_at FROM player_title_unlock_time WHERE title = ?",
+                (title,),
+            ) or []
+            if unlock_rows:
+                earliest_by_xuid: Dict[str, str] = {}
+                for row in unlock_rows:
+                    xuid = str(row.get("xuid") or "").strip()
+                    if not xuid:
+                        continue
+                    unlocked_at = str(row.get("unlocked_at") or "")
+                    prev = earliest_by_xuid.get(xuid)
+                    if prev is None or (unlocked_at and unlocked_at < prev):
+                        earliest_by_xuid[xuid] = unlocked_at
+
+                removed_unlocks = db.execute(
+                    "DELETE FROM player_title_unlock_time WHERE title = ?",
+                    (title,),
+                )
+                if removed_unlocks:
+                    migrated_unlocks += int(removed_unlocks)
+
+                for xuid, unlocked_at in earliest_by_xuid.items():
+                    db.execute(
+                        "INSERT OR IGNORE INTO player_title_unlock_time "
+                        "(xuid, title, rarity, unlocked_at) VALUES (?, ?, ?, ?)",
+                        (xuid, title, target_rarity, unlocked_at or None),
+                    )
+
+            updated_equipped = db.execute(
+                "UPDATE player_title_equipped SET rarity = ? "
+                "WHERE title = ? AND COALESCE(rarity, '') != ?",
+                (target_rarity, title, target_rarity),
+            )
+            if updated_equipped:
+                migrated_equipped += int(updated_equipped)
+
+        if migrated_defs or migrated_unlocks or migrated_equipped:
+            self.logger.info(
+                f"{LOG_PREFIX} 头衔稀有度迁移：删除多余定义 {migrated_defs} 条，"
+                f"整理解锁 {migrated_unlocks} 条，修正佩戴 {migrated_equipped} 条"
+            )
+
+    def _resync_all_pvp_kd_titles(self) -> None:
+        rows = self.db.query_all(
+            "SELECT xuid FROM player_kd WHERE kills > 0 OR deaths > 0",
+            (),
+        ) or []
+        for row in rows:
+            xuid = str(row.get("xuid") or "").strip()
+            if xuid:
+                self._sync_pvp_kd_title(xuid)
+
     def _sync_pvp_kd_title(self, xuid: str, player=None) -> None:
         if self.arc is None:
             return
@@ -311,7 +439,7 @@ class ARCPvPKDPlugin(Plugin):
         if kills <= 0 and deaths <= 0:
             return
         kd = self.calc_kd(kills, deaths)
-        target_title = self.title_for_kd(kd)
+        target_title, target_rarity = self.title_info_for_kd(kd)
 
         title_system = getattr(self.arc, "title_system", None)
         equipped = ""
@@ -334,9 +462,9 @@ class ARCPvPKDPlugin(Plugin):
             online = self._find_online_by_xuid(xuid)
         try:
             if online is not None:
-                self.arc.api_unlock_title(online, target_title)
+                self.arc.api_unlock_title(online, target_title, rarity=target_rarity)
             else:
-                self.arc.api_unlock_title_by_xuid(xuid, target_title)
+                self.arc.api_unlock_title_by_xuid(xuid, target_title, rarity=target_rarity)
         except Exception as e:
             self.logger.warning(f"{LOG_PREFIX} 解锁头衔失败: {e}")
             return
@@ -344,7 +472,7 @@ class ARCPvPKDPlugin(Plugin):
         should_equip = (not equipped) or (equipped in ALL_PVP_KD_TITLES)
         if should_equip and title_system is not None and online is not None:
             try:
-                title_system.set_equipped_title(online, target_title)
+                title_system.set_equipped_title(online, target_title, target_rarity)
                 update_tag = getattr(self.arc, "_update_player_name_tag", None)
                 if callable(update_tag):
                     update_tag(online)
@@ -413,7 +541,7 @@ class ARCPvPKDPlugin(Plugin):
                     kd = self.calc_kd(k, d)
                     ktitle, krarity = self.title_info_for_kd(kd)
                     killer_online.send_message(
-                        f"§f[{BROADCAST_TAG}] 击杀 {victim_name} | K/D {k}/{d} ({kd:.2f}) → {self._format_title(ktitle, krarity)}"
+                        f"§f[{BROADCAST_TAG}] 击杀 {victim_name} | K/D {k}/{d} ({self.format_kd(k, d)}) → {self._format_title(ktitle, krarity)}"
                     )
                 victim.send_message(
                     f"§f[{BROADCAST_TAG}] 你被 {killer_name} 击杀"
@@ -443,6 +571,18 @@ class ARCPvPKDPlugin(Plugin):
         return "", ""
 
     @event_handler
+    def on_player_join(self, event: PlayerJoinEvent):
+        try:
+            name = str(getattr(event.player, "name", "") or "")
+            self.server.scheduler.run_task(
+                self,
+                lambda n=name: self._broadcast_leaderboard_on_join(n),
+                delay=JOIN_BROADCAST_DELAY_TICKS,
+            )
+        except Exception as e:
+            self.logger.warning(f"{LOG_PREFIX} on_player_join 异常: {e}")
+
+    @event_handler
     def on_player_quit(self, event: PlayerQuitEvent):
         try:
             xuid = str(getattr(event.player, "xuid", "") or "")
@@ -461,7 +601,7 @@ class ARCPvPKDPlugin(Plugin):
             title_text = "§f（暂无）"
 
         lines = [
-            f"§f你的战绩：{kills} 杀 / {deaths} 死  KD={kd:.2f}",
+            f"§f你的战绩：{kills} 杀 / {deaths} 死  KD={self.format_kd(kills, deaths)}",
             f"§f当前称号：{title_text}",
             "",
         ]
