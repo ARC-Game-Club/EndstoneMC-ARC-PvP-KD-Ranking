@@ -94,12 +94,35 @@ class ARCPvPKDPlugin(Plugin):
             self.logger.warning(f"{LOG_PREFIX} 未找到 arc_core，头衔功能将不可用（KD 仍会记录）")
         else:
             self._ensure_pvp_kd_titles()
+            self._register_arc_main_menu_button()
             self.logger.info(f"{LOG_PREFIX} 已连接 arc_core，PvP KD 头衔已注册")
 
     def on_disable(self) -> None:
         self.logger.info(f"{LOG_PREFIX} on_disable")
+        try:
+            arc = getattr(self, "arc", None) or self.server.plugin_manager.get_plugin("arc_core")
+            if arc is not None and hasattr(arc, "api_unregister_main_menu_button"):
+                arc.api_unregister_main_menu_button("arc_pvp_kd:main")
+        except Exception:
+            pass
         if hasattr(self, "db"):
             self.db.close()
+
+    def _register_arc_main_menu_button(self) -> None:
+        arc = getattr(self, "arc", None)
+        if arc is None or not hasattr(arc, "api_register_main_menu_button"):
+            return
+        try:
+            ok = arc.api_register_main_menu_button(
+                "arc_pvp_kd:main",
+                "PvP KD 排行榜",
+                on_click=self._show_ranking_panel,
+                priority=6,
+            )
+            if ok:
+                self.logger.info(f"{LOG_PREFIX} 已注册 ARC 主菜单按钮")
+        except Exception as e:
+            self.logger.warning(f"{LOG_PREFIX} 注册 ARC 主菜单按钮失败: {e}")
 
     def on_command(self, sender: CommandSender, command: Command, args: list[str]) -> bool:
         if command.name != "kd":
