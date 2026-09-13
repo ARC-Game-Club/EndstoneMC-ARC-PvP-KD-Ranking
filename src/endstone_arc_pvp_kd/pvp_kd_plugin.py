@@ -125,6 +125,7 @@ class ARCPvPKDPlugin(Plugin):
                 "PvP KD 排行榜",
                 on_click=self._show_ranking_panel,
                 priority=6,
+                icon="textures/arc_core/pvp_kd.png",
             )
             if ok:
                 self.logger.info(f"{LOG_PREFIX} 已注册 ARC 主菜单按钮")
