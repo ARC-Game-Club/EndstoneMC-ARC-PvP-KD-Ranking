@@ -16,7 +16,7 @@ keywords = ["endstone", "plugin", "pvp", "kd", "ranking", "arc"]
 requires-python = ">=3.10"
 
 [project.urls]
-Homepage = "https://github.com/ARC-Minecraft/EndstoneMC-ARC-PvP-KD-Ranking"
+Homepage = "https://github.com/ARC-Game-Club/EndstoneMC-ARC-PvP-KD-Ranking"
 
 [project.entry-points."endstone"]
 arc_pvp_kd = "endstone_arc_pvp_kd:ARCPvPKDPlugin"
